@@ -7,7 +7,7 @@
   var DATA = window.RADAR;
   if (!DATA) return;
   var app = document.getElementById('board');
-  var state = { q: '', category: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, minTvl: 0, watchlistOnly: false };
+  var state = { q: '', category: 'all', chain: 'all', tab: 'pre-token', sort: 'implied', dir: -1, selected: null, minTvl: 0, watchlistOnly: false };
 
   var usd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
   function fmtUsd(n) {
@@ -135,6 +135,7 @@
     if (params.get('q')) state.q = params.get('q');
     if (params.get('p')) state.selected = params.get('p');
     if (params.get('category')) state.category = params.get('category');
+    if (params.get('chain')) state.chain = params.get('chain');
     if (params.get('tvl')) state.minTvl = parseInt(params.get('tvl'), 10) || 0;
     if (params.get('wl') === '1') state.watchlistOnly = true;
   }
@@ -142,6 +143,7 @@
     var params = new URLSearchParams();
     if (state.q) params.set('q', state.q);
     if (state.category !== 'all') params.set('category', state.category);
+    if (state.chain !== 'all') params.set('chain', state.chain);
     if (state.minTvl) params.set('tvl', String(state.minTvl));
     if (state.watchlistOnly) params.set('wl', '1');
     if (state.selected) params.set('p', state.selected);
@@ -154,6 +156,7 @@
     var q = state.q.trim().toLowerCase();
     return DATA.rows.filter(function (r) {
       if (state.category !== 'all' && r.category !== state.category) return false;
+      if (state.chain !== 'all' && (r.chains || []).indexOf(state.chain) < 0) return false;
       if (r.tvl_usd < state.minTvl) return false;
       if (state.watchlistOnly && !DATA.watchlistSlugs[r.slug]) return false;
       if (!q) return true;
@@ -180,6 +183,121 @@
     var vals = DATA.rows.map(function (r) { return r.implied_value_usd; }).sort(function (a, b) { return a - b; });
     if (!vals.length) return 0;
     return vals[Math.floor(vals.length / 2)];
+  }
+
+  // ---- CSV export and chain summary ----
+  //
+  // A reader who wants the filtered board in a spreadsheet should not have
+  // to copy it by hand. These helpers turn the rows the board is currently
+  // showing into one CSV document and offer it as a download, all offline:
+  // the file is built from the same data.js the page already holds, so the
+  // download and the board can never disagree.
+  function csvCell(value) {
+    var text = value === null || value === undefined ? '' : String(value);
+    if (/[",\n]/.test(text)) return '"' + text.replace(/"/g, '""') + '"';
+    return text;
+  }
+  function boardCsv(list) {
+    var head = ['rank', 'protocol', 'category', 'chains', 'tvl_usd', 'change_7d_pct', 'age_days', 'implied_value_usd'];
+    var lines = [head.map(csvCell).join(',')];
+    list.forEach(function (r) {
+      lines.push([
+        r.rank,
+        r.name,
+        r.category || 'Other',
+        (r.chains || []).join('; '),
+        r.tvl_usd,
+        r.change_7d === null ? '' : r.change_7d,
+        r.age_days === null ? '' : r.age_days,
+        r.implied_value_usd
+      ].map(csvCell).join(','));
+    });
+    return lines.join('\n') + '\n';
+  }
+  function downloadCsv() {
+    var list = sortedRows(rows());
+    if (!list.length) return;
+    var blob = new Blob([boardCsv(list)], { type: 'text/csv;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'token-radar-board.csv';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // The same filtered rows as a JSON download, for a reader who wants the
+  // board in a form a script can read without scraping the page.
+  function downloadJson() {
+    var list = sortedRows(rows());
+    if (!list.length) return;
+    var blob = new Blob([JSON.stringify({ as_of: DATA.as_of, model: DATA.model_version, rows: list }, null, 2) + '\n'], { type: 'application/json;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement('a');
+    link.href = url;
+    link.download = 'token-radar-board.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // The chains the board covers, most rows first. A chain filter is only
+  // useful when the reader can see which chains actually have rows, so the
+  // options and the summary are built from the same count.
+  function chainCounts() {
+    var counts = {};
+    DATA.rows.forEach(function (r) {
+      (r.chains || []).forEach(function (chain) {
+        counts[chain] = (counts[chain] || 0) + 1;
+      });
+    });
+    return Object.keys(counts).map(function (chain) {
+      return { chain: chain, count: counts[chain] };
+    }).sort(function (a, b) { return b.count - a.count || (a.chain < b.chain ? -1 : 1); });
+  }
+  function chainOptions() {
+    return chainCounts().map(function (entry) { return entry.chain; });
+  }
+  function topChains(limit) {
+    return chainCounts().slice(0, limit);
+  }
+
+  // Copy the current view's link (the page's own URL plus the filter hash)
+  // so a reader can share exactly the board they are looking at, filters
+  // and all. Falls back to a temporary field when the clipboard API is
+  // absent, so the button works in any browser the page opens in.
+  function copyShareLink() {
+    var url = window.location.href;
+    function done() {
+      var note = document.getElementById('share-note');
+      if (note) note.textContent = 'Link copied: ' + url;
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(url).then(done, done);
+    } else {
+      var field = document.createElement('textarea');
+      field.value = url;
+      document.body.appendChild(field);
+      field.select();
+      try { document.execCommand('copy'); } catch (e) { /* the link stays visible in the field */ }
+      field.remove();
+      done();
+    }
+  }
+
+  // A one-line summary of the filters in force, so a reader who follows a
+  // shared link can see at a glance why the board shows the rows it shows.
+  function activeFiltersText() {
+    var parts = [];
+    if (state.q) parts.push('search "' + state.q + '"');
+    if (state.category !== 'all') parts.push('category ' + state.category);
+    if (state.chain !== 'all') parts.push('chain ' + state.chain);
+    if (state.minTvl) parts.push('TVL $' + Math.round(state.minTvl / 1e6) + 'M+');
+    if (state.watchlistOnly) parts.push('watchlist only');
+    return parts.length ? 'Showing ' + rows().length + ' of ' + DATA.rows.length + ' rows — ' + parts.join(', ') + '.' : 'Showing all ' + DATA.rows.length + ' rows.';
   }
 
   function header() {
@@ -227,6 +345,17 @@
       el('option', { value: '1000000000', text: 'TVL $1B+', selected: state.minTvl === 1000000000 ? 'selected' : null })
     );
     tvl.addEventListener('change', function () { state.minTvl = parseInt(tvl.value, 10) || 0; writeHash(); render(); });
+    // The chain filter lists only chains that actually have rows, with a
+    // count each, so the reader can see which chains are worth filtering to.
+    var chainCountsByName = {};
+    chainCounts().forEach(function (e) { chainCountsByName[e.chain] = e.count; });
+    var chain = el('select', { id: 'chain', 'aria-label': 'Filter by chain' },
+      el('option', { value: 'all', text: 'All chains' }),
+      chainOptions().map(function (c) {
+        return el('option', { value: c, text: c + ' (' + chainCountsByName[c] + ')', selected: c === state.chain ? 'selected' : null });
+      })
+    );
+    chain.addEventListener('change', function () { state.chain = chain.value; writeHash(); render(); });
     var wl = el('label', { class: 'check' },
       el('input', { type: 'checkbox', id: 'wl', checked: state.watchlistOnly ? 'checked' : null }),
       'Watchlist only'
@@ -234,12 +363,33 @@
     wl.querySelector('input').addEventListener('change', function (e) { state.watchlistOnly = e.target.checked; writeHash(); render(); });
     var pre = el('button', { type: 'button', 'aria-pressed': state.tab === 'pre-token' ? 'true' : 'false', text: 'Pre-token', onclick: function () { state.tab = 'pre-token'; render(); } });
     var live = el('button', { type: 'button', 'aria-pressed': state.tab === 'live' ? 'true' : 'false', text: 'Live token', onclick: function () { state.tab = 'live'; render(); } });
+    // Offline CSV of exactly the rows the board is showing, so a reader can
+    // take the filtered board into a spreadsheet without copying by hand.
+    var csv = el('button', { class: 'button', type: 'button', text: 'Download CSV', onclick: function () { downloadCsv(); } });
+    var share = el('button', { class: 'button', type: 'button', text: 'Copy link', onclick: function () { copyShareLink(); } });
+    var shareNote = el('span', { id: 'share-note', class: 'sub' });
+    var json = el('button', { class: 'button', type: 'button', text: 'Download JSON', onclick: function () { downloadJson(); } });
+    var reset = el('button', { class: 'button', type: 'button', text: 'Reset filters', onclick: function () {
+      state.q = '';
+      state.category = 'all';
+      state.chain = 'all';
+      state.minTvl = 0;
+      state.watchlistOnly = false;
+      writeHash();
+      render();
+    } });
     return el('div', { class: 'controls' },
       el('div', { class: 'field' }, el('label', { for: 'q', text: 'Search' }), search),
       el('div', { class: 'field' }, el('label', { for: 'category', text: 'Category' }), select),
       el('div', { class: 'field' }, el('label', { for: 'tvl', text: 'Minimum TVL' }), tvl),
+      el('div', { class: 'field' }, el('label', { for: 'chain', text: 'Chain' }), chain),
       wl,
       el('div', { class: 'field' }, el('span', { class: 'sub', text: 'Token status' }), el('div', { class: 'tabs' }, pre, live)),
+      csv,
+      share,
+      shareNote,
+      json,
+      reset,
       el('span', { class: 'count', text: state.tab === 'pre-token' ? rows().length + ' rows shown' : DATA.live.length + ' live-token protocols' })
     );
   }
@@ -291,6 +441,7 @@
       tbody.appendChild(tr);
     });
     return el('div', { class: 'panel' },
+      el('p', { class: 'sub', text: activeFiltersText() }),
       el('div', { class: 'table-wrap' },
         el('table', null,
           el('caption', { class: 'sub', text: 'Pre-token protocols, strongest implied value first. Select a row for its model and farm plan.' }),
@@ -341,6 +492,25 @@
         'implied = round( tvl_usd x ' + m.base_multiple + ' x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight + ') x (' + m.maturity_floor + ' + ' + m.maturity_range + ' x (1 - exp(-age_days / ' + m.maturity_scale_days + ')) )'
       ),
       el('p', { class: 'sub', text: 'TVL and seven-day growth come from the snapshot. Age is the time since the protocol was first listed, the best record of how long it has run with no token; an unlisted age uses ' + m.unknown_age_days + ' days. Maturity saturates: the first year with no token proves durability, the third adds little more. The board is the complete set of pre-token protocols the watchlist rule would keep, not a capped sample, and the live-token protocols are set aside with their market caps shown.' })
+    );
+  }
+
+  // Where the rows live: the five chains with the most pre-token protocols.
+  // Each chain is a button that filters the board to it, so the summary and
+  // the filter stay in step instead of drifting apart.
+  function chainPanel() {
+    var top = topChains(5);
+    if (!top.length) return null;
+    return el('section', { class: 'panel chains' },
+      el('h2', { text: 'Where the rows live' }),
+      el('p', { class: 'sub', text: 'Chains by number of pre-token rows on the board. Pick one to see only its protocols.' }),
+      el('ul', { class: 'chain-list' }, top.map(function (entry) {
+        return el('li', null,
+          el('button', { type: 'button', onclick: function () { state.chain = entry.chain; writeHash(); render(); } },
+            entry.chain, el('span', { class: 'count', text: String(entry.count) })
+          )
+        );
+      }))
     );
   }
 
@@ -398,6 +568,10 @@
     shell.appendChild(controls());
     shell.appendChild(state.tab === 'pre-token' ? boardTable() : liveTable());
     if (state.tab === 'pre-token') shell.appendChild(modelPanel());
+    if (state.tab === 'pre-token') {
+      var chains = chainPanel();
+      if (chains) shell.appendChild(chains);
+    }
     shell.appendChild(el('p', { class: 'note', html: 'Snapshot ' + DATA.as_of + ' from DefiLlama. Implied values are this entry’s model, not a price. “No token” means the snapshot records none; a protocol may still have a token its record does not carry.' }));
     app.appendChild(shell);
     app.setAttribute('aria-busy', 'false');

@@ -521,6 +521,87 @@ export function boardIssue(board: BoardRow[], snapshot: Snapshot): string | null
   return null;
 }
 
+/** The model as one readable line, for the dashboard and the log. */
+export function formulaText(model: ModelConstants): string {
+  return `implied = round(tvl_usd x ${model.base_multiple} x (1 + clamp(change_7d, ${model.growth_floor}, ${model.growth_cap}) / 100 x ${model.growth_weight}) x (${model.maturity_floor} + ${model.maturity_range} x (1 - exp(-age_days / ${model.maturity_scale_days}))))`;
+}
+
+/** One row's model inputs as a short, human-readable sentence. */
+export function describeRow(row: BoardRow): string {
+  const age = row.age_days === null ? 'an unknown age' : `${row.age_days} days with no token`;
+  const growth = row.change_7d === null ? 'no reported seven-day move' : `a ${row.change_7d >= 0 ? '+' : ''}${row.change_7d}% seven-day move`;
+  return `#${row.rank} ${row.name}: TVL $${row.tvl_usd.toLocaleString('en-US')}, ${growth}, ${age}, implied $${row.implied_value_usd.toLocaleString('en-US')}.`;
+}
+
+/** The board's headline figures in one place, for the log and the page. */
+export interface BoardHeadline {
+  watchlist: number;
+  board: number;
+  early: number;
+  live: number;
+  top_implied: number;
+  median_implied: number;
+}
+
+export function headlineOf(board: BoardRow[], snapshot: Snapshot, liveCount: number): BoardHeadline {
+  const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
+  const values = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
+  return {
+    watchlist: snapshot.watchlist.length,
+    board: board.length,
+    early,
+    live: liveCount,
+    top_implied: values.length ? values[values.length - 1]! : 0,
+    median_implied: values.length ? values[Math.floor(values.length / 2)]! : 0,
+  };
+}
+
+/** The share of the board that is the watchlist itself, as a whole per cent. */
+export function watchlistShare(board: BoardRow[], snapshot: Snapshot): number {
+  if (board.length === 0) return 0;
+  const onList = board.filter((r) => snapshot.watchlist.includes(r.slug)).length;
+  return Math.round((onList / board.length) * 100);
+}
+
+/** The chains on the board, most rows first, with each chain's row count. */
+export function chainRanking(board: BoardRow[]): { chain: string; rows: number }[] {
+  const counts = new Map<string, number>();
+  for (const row of board) {
+    for (const chain of row.chains) counts.set(chain, (counts.get(chain) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([chain, rows]) => ({ chain, rows }))
+    .sort((a, b) => b.rows - a.rows || (a.chain < b.chain ? -1 : 1));
+}
+
+/** The age band a row falls in: new, seasoned, or veteran with no token. */
+export function ageBand(ageDays: number | null): 'new' | 'seasoned' | 'veteran' | 'unknown' {
+  if (ageDays === null) return 'unknown';
+  if (ageDays < 180) return 'new';
+  if (ageDays < 365) return 'seasoned';
+  return 'veteran';
+}
+
+/** The strongest row of each category, strongest first. */
+export function topByCategory(board: BoardRow[]): { category: string; row: BoardRow }[] {
+  const best = new Map<string, BoardRow>();
+  for (const row of board) {
+    const key = row.category ?? 'Other';
+    const current = best.get(key);
+    if (current === undefined || row.implied_value_usd > current.implied_value_usd) best.set(key, row);
+  }
+  return [...best.entries()]
+    .map(([category, row]) => ({ category, row }))
+    .sort((a, b) => b.row.implied_value_usd - a.row.implied_value_usd);
+}
+
+/** The median implied value across the board, or 0 for an empty board. */
+export function medianImplied(board: BoardRow[]): number {
+  if (board.length === 0) return 0;
+  const values = board.map((r) => r.implied_value_usd).sort((a, b) => a - b);
+  return values[Math.floor(values.length / 2)]!;
+}
+
 /** A compact data.js: the dashboard's whole dataset as one script, no fetch and no network. */
 export function dataScript(radar: RadarData): string {
   return `window.RADAR=${JSON.stringify(radar)};\n`;
